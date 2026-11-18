@@ -21,14 +21,17 @@ q('check').onclick=()=>action(async()=>{
  const r=await rpc('verifyRegistrationPin',{idToken:token,pin});
  if(r.registered){log('このLINE利用者はテスト登録済みです。保存結果を確認できます。');return;}
  grant=r.grant;if(!grant)throw Error('確認用情報を受け取れませんでした');
- q('before').disabled=false;q('after').disabled=false;log('PIN確認成功。先に「修正前」を実行してください。');
+ q('before').disabled=false;q('after').disabled=false;log('PIN確認成功。取得時刻 '+new Date().toISOString()+'。期限切れ試験では16分以上待ってから「修正後」を実行してください。');
 });
 async function register(includeGrant){
  const payload={idToken:token,realName:'テスト太郎',guardRole:'一般警備員',page:'transport'};
  if(includeGrant)payload.registrationGrant=grant;
- const r=await rpc('registerStaffName',payload);
+ const journal=window.SHISHIDOGUMI_RECOVERY.createJournal(window.SHISHIDOGUMI_RECOVERY.browserStore());
+ const r=await journal.execute('isolated-expiry-registration','registerStaffName',payload,rpc);
+ const records=await journal.list('isolated-expiry-registration');
+ if(!records.length||records[0].state!=='received')throw Error('端末の受付状態を確認できませんでした');
  if(!r.registered||r.needsNameRegistration)throw Error('登録結果が不完全です');
- log((includeGrant?'修正後':'修正前')+'：登録結果を受信。氏名 '+r.name+'。保存結果を確認してください。');
+ log((includeGrant?'修正後':'修正前')+'：登録結果を受信。氏名 '+r.name+'。端末受付済み。保存結果を確認してください。');
 }
 q('before').onclick=()=>action(()=>register(false));
 q('after').onclick=()=>action(()=>register(true));
