@@ -36,7 +36,8 @@ async function register(includeGrant){
 q('before').onclick=()=>action(()=>register(false));
 q('after').onclick=()=>action(()=>register(true));
 q('read').onclick=()=>action(async()=>{const r=await rpc('readTestRegistration',{idToken:token});log('保存済み: '+r.registered+'\n氏名: '+(r.name||'未登録')+'\n初回登録未完了: '+r.needsNameRegistration);});
-q('login').onclick=()=>liff.login({redirectUri:location.origin+location.pathname});
+q('login').textContent='LINE認証を更新してログイン';
+q('login').onclick=()=>{liff.logout();liff.login({redirectUri:location.origin+location.pathname});};
 (async()=>{try{
  if(typeof liff==='undefined')throw Error('LINE SDKを読み込めませんでした。通信状態を確認してください。');
  await liff.init({liffId:LIFF_ID});
