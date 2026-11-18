@@ -42,4 +42,112 @@ q('login').onclick=()=>liff.login({redirectUri:location.origin+location.pathname
  q('state').textContent='テスト用LINE認証が完了しました。';
  q('check').disabled=false;q('read').disabled=false;
 }catch(e){q('state').textContent='LINE認証を開始できませんでした。'+(e.code?' コード: '+e.code:'');log('画面を閉じて、案内されたテスト用LINEリンクから開き直してください。');}})();
+</script><script>
+/* Save the submission before sending; never persist a LINE token or a stale balance. */
+(function(root){
+ 'use strict';
+ const labels={workClockIn:'上番報告',workClockOut:'下番報告',workProvisionalOut:'仮下番報告',saveTransportation:'交通費申請',employeeDailyApply:'日払い申請',saveExpense:'経費申請',saveDailyReport:'警備日報',saveShiftRequests:'シフト申請',registerStaffName:'氏名登録'};
+ function registrationPayload_(method,data){const p=JSON.parse(JSON.stringify(data));delete p.idToken;delete p.id_token;if(method==='registerStaffName')delete p.registrationGrant;return p;}
+ function createJournal(store){
+  const running=new Map();
+  async function execute(uid,method,data,send,notify){
+   if(!labels[method]||!uid)return send(method,data);
+   const payload=registrationPayload_(method,data);
+   const id=String(data.requestId||data.workId||'registration'),key=JSON.stringify([uid,method,id]);
+   if(running.has(key))return running.get(key);
+   const job=(async()=>{
+    let previous;try{previous=await store.get(key);}catch(e){throw Error('送信内容を端末に保存できませんでした。ブラウザの保存設定を確認してください。申請はまだ送信していません。');}
+    if(previous&&previous.state==='pending'&&JSON.stringify(registrationPayload_(method,previous.payload))!==JSON.stringify(payload))throw Error('同じ勤務の確認待ちの報告があります。先に「受付確認・同じ内容で再送」で確認してください。');
+    const record={key,uid,method,payload,state:'pending',created:previous?.created||Date.now(),updated:Date.now()};
+    try{await store.put(record);}catch(e){throw Error('送信内容を端末に保存できませんでした。空き容量やブラウザ設定を確認してください。申請はまだ送信していません。');}
+    notify?.('saving',record);
+    const timer=typeof root.setTimeout==='function'?root.setTimeout(()=>notify?.('waiting',record),8000):null;
+    try{
+     const result=await send(method,data);
+     if(result===undefined||result===null||result.complete===false)throw Error('保存結果を確認できませんでした。同じ内容で受付を確認してください。');
+     const receipt={...record,state:'received',message:typeof result==='string'?result:String(result.message||'受付結果を受信しました。'),receipt:result.namesConfirmed===true?'':result.receipt||'',updated:Date.now()};delete receipt.payload;
+     // A failed local acknowledgement must not turn a server success into a failed application.
+     try{await store.put(receipt);}catch(e){notify?.('ack-storage-failed',record);}
+     notify?.('received',receipt);return result;
+    }catch(e){notify?.('unconfirmed',record);throw e;}finally{if(timer!==null)root.clearTimeout(timer);}
+   })();running.set(key,job);try{return await job;}finally{running.delete(key);}
+  }
+  return {execute,running,list:uid=>store.list(uid),remove:key=>store.remove(key)};
+ }
+ function browserStore(){
+  let opened;
+  function open(){if(!opened)opened=new Promise((resolve,reject)=>{
+   if(!root.indexedDB)return reject(Error('IndexedDB unavailable'));
+   const req=root.indexedDB.open('shishidogumi-isolated-recovery-v1',1);
+   req.onupgradeneeded=()=>req.result.createObjectStore('submissions',{keyPath:'key'});
+   req.onsuccess=()=>{req.result.onversionchange=()=>{req.result.close();opened=null;};resolve(req.result);};req.onerror=()=>{opened=null;reject(req.error);};req.onblocked=()=>{opened=null;reject(Error('Storage blocked'));};
+  });return opened;}
+  async function operation(mode,fn){const db=await open();return new Promise((resolve,reject)=>{
+   let tx;try{tx=db.transaction('submissions',mode,{durability:'strict'});}catch(e){tx=db.transaction('submissions',mode);}
+   let value;const req=fn(tx.objectStore('submissions'));req.onsuccess=()=>value=req.result;tx.oncomplete=()=>resolve(value);tx.onabort=tx.onerror=()=>reject(tx.error||Error('Storage failed'));
+  });}
+  return {get:key=>operation('readonly',s=>s.get(key)),put:value=>operation('readwrite',s=>s.put(value)),remove:key=>operation('readwrite',s=>s.delete(key)),list:async uid=>(await operation('readonly',s=>s.getAll())).filter(r=>r.uid===uid)};
+ }
+ const storeForBrowser=browserStore();let config=null,uiBusy=false,journal=createJournal(storeForBrowser);
+ function identity(){return config?.userId||root.SHISHIDOGUMI_BOOTSTRAP?.currentUser?.userId||'';}
+ function banner(text){if(!root.document?.body)return;let el=root.document.getElementById('submissionSaveStatus');if(!el){el=root.document.createElement('p');el.id='submissionSaveStatus';el.setAttribute('role','status');el.style.cssText='position:sticky;top:0;z-index:10000;background:#fff2c6;color:#4c3600;border:2px solid #d8a400;padding:14px;font-weight:bold;white-space:pre-line';root.document.body.prepend(el);}el.textContent=text;el.hidden=!text;}
+ async function render(){
+  if(!config||!root.document?.body)return;let rows;try{rows=await journal.list(identity());}catch(e){return;}
+  let el=root.document.getElementById('submissionRecovery');if(!el){el=root.document.createElement('section');el.id='submissionRecovery';el.style.cssText='border:2px solid #d8a400;padding:14px;margin:12px 0;background:#fff9e8;border-radius:8px';root.document.body.prepend(el);}
+  el.replaceChildren();const pending=rows.filter(r=>r.state==='pending'),recent=rows.filter(r=>r.state==='received'&&r.receipt&&r.method==='saveDailyReport');el.hidden=!pending.length&&!recent.length;
+  if(el.hidden)return;const title=root.document.createElement('strong');title.textContent=pending.length?'受付結果を確認できていない申請があります':'保存済み日報の会社名・現場名の確認';el.append(title);
+  for(const r of pending.concat(recent.slice(-1))){
+   const line=root.document.createElement('p');line.textContent=labels[r.method]+' ／ '+new Date(r.created).toLocaleString('ja-JP')+(r.payload?.amount?' ／ '+Number(r.payload.amount).toLocaleString('ja-JP')+'円':'');el.append(line);
+   if(r.state==='pending'){const button=root.document.createElement('button');button.type='button';button.textContent='受付確認・同じ内容で再送';button.disabled=uiBusy||journal.running.has(r.key);button.onclick=async()=>{
+    if(uiBusy||journal.running.size||typeof root.applicationSaving_==='function'&&root.applicationSaving_())return;uiBusy=true;button.disabled=true;
+    try{const token=config.token();if(!token)throw Error('LINEから開き直してください。');const result=await run(r.method,{...registrationPayload_(r.method,r.payload),idToken:token});root.dispatchEvent(new CustomEvent('shishidogumi-recovered',{detail:{method:r.method,result}}));banner(typeof result==='string'?result:result.message||'受付結果を確認しました。');}
+    catch(e){if(r.method==='registerStaffName'){root.dispatchEvent(new CustomEvent('shishidogumi-registration-recovery',{detail:{payload:registrationPayload_(r.method,r.payload)}}));banner('登録結果を確認できませんでした。暗証番号を再確認し、保存されている同じ氏名・区分で登録してください。');}else banner(e.message||'受付結果を確認できませんでした。内容は端末に保持されています。');}
+    finally{uiBusy=false;render();}
+   };el.append(button);}
+   else{const button=root.document.createElement('button');button.type='button';button.textContent='日報の会社名・現場名を確認する';button.onclick=()=>root.dispatchEvent(new CustomEvent('shishidogumi-recovered',{detail:{method:r.method,result:{receipt:r.receipt}}}));el.append(button);}
+  }
+  for(const r of rows)if(r.state==='received'&&Date.now()-r.updated>7*86400000)journal.remove(r.key).catch(()=>{});
+ }
+ function notify(state){if(state==='saving')banner('送信中です。まだ保存完了ではありません。\n受付結果が表示されるまでお待ちください。');if(state==='waiting')banner('保存の確認に時間がかかっています。まだ完了していません。\n送信内容は端末に保存済みです。画面を閉じた場合は、開き直して受付結果を確認してください。');if(state==='unconfirmed')banner('受付結果を確認できませんでした。送信内容は端末に保持されています。\n「受付確認・同じ内容で再送」で確認してください。');if(state==='received')banner('');render();}
+ async function run(method,data,send){return journal.execute(identity(),method,data,send||config.send,notify);}
+ function attach(value){config=value;render();}
+ async function finishReport(receipt){for(const r of await journal.list(identity()))if(r.state==='received'&&r.receipt===receipt){r.receipt='';await storeForBrowser.put(r);}render();}
+ root.SHISHIDOGUMI_RECOVERY={createJournal,browserStore,attach,run,isWrite:method=>!!labels[method],render,isSaving:()=>journal.running.size>0,finishReport};
+ root.addEventListener?.('beforeunload',e=>{if(journal.running.size){e.preventDefault();e.returnValue='';}});
+ root.document?.addEventListener('visibilitychange',()=>{if(root.document.visibilityState==='visible')render();});
+})(typeof window!=='undefined'?window:globalThis);
+
+</script><script>
+(function(){
+ const section=document.createElement('section');section.innerHTML='<h2>追加：通信中断からの復旧検証</h2><p>模擬の期限切れ・通信中断と、ブラウザの実保存領域を組み合わせます。本番の保存領域は使いません。</p><button id="runRecoveryFixtures">端末保存・復旧を検証（模擬通信）</button><button id="runRegisteredReplay">登録済みテスト利用者の再送を検証（実GAS）</button><pre id="recoveryResults"></pre>';
+ document.body.append(section);const out=document.getElementById('recoveryResults');
+ const store=window.SHISHIDOGUMI_RECOVERY.browserStore();const journal=window.SHISHIDOGUMI_RECOVERY.createJournal(store);
+ const payload={realName:'テスト太郎',guardRole:'一般警備員',page:'transport'};
+ let active=false;function check(ok,msg){if(!ok)throw Error(msg)}
+ document.getElementById('runRecoveryFixtures').onclick=async()=>{if(active)return;active=true;out.textContent='検証中…';const uid='isolated-fixture-'+Date.now(),lines=[];const all=[];
+ async function test(label,fn){await fn();lines.push('PASS '+label);out.textContent=lines.join('\n')}
+ async function rejected(fn){let error;try{await fn()}catch(e){error=e}check(error,'期待した拒否がありません');return error}
+ try{
+ await test('期限切れgrantの失敗を保存',async()=>{await rejected(()=>journal.execute(uid,'registerStaffName',{...payload,registrationGrant:'fake-expired'},async()=>{throw Error('模擬：期限切れ')}));const rows=await journal.list(uid);check(rows[0].state==='pending','pendingなし');check(!('registrationGrant'in rows[0].payload),'grant保存');});
+ await test('同じ内容・新grantで復旧',async()=>{await journal.execute(uid,'registerStaffName',{...payload,registrationGrant:'fake-new'},async(m,p)=>{check(p.registrationGrant==='fake-new','新grantなし');return {registered:true,needsNameRegistration:false}});check((await journal.list(uid))[0].state==='received','受付なし')});
+ await test('旧形式pendingも復旧',async()=>{const u=uid+'-legacy',key=JSON.stringify([u,'registerStaffName','registration']);all.push(u);await store.put({key,uid:u,method:'registerStaffName',payload:{...payload,registrationGrant:'fake-old'},state:'pending',created:Date.now(),updated:Date.now()});await journal.execute(u,'registerStaffName',{...payload,registrationGrant:'fake-new'},async()=>({registered:true}));check((await journal.list(u))[0].state==='received','旧形式失敗')});
+ await test('応答喪失後も同じ受付を再確認（書込1回のモデル）',async()=>{const u=uid+'-lost';all.push(u);let writes=0,saved=false;const send=async()=>{if(saved)return {registered:true,needsNameRegistration:false};saved=true;writes++;throw Error('模擬：応答喪失')};await rejected(()=>journal.execute(u,'registerStaffName',payload,send));await journal.execute(u,'registerStaffName',payload,send);check(writes===1,'二重書込')});
+ await test('未確定の氏名変更は拒否',async()=>{const u=uid+'-conflict';all.push(u);await rejected(()=>journal.execute(u,'registerStaffName',payload,async()=>{throw Error('模擬：応答喪失')}));const e=await rejected(()=>journal.execute(u,'registerStaffName',{...payload,realName:'別のテスト名',registrationGrant:'fake-new'},async()=>({registered:true})));check(e.message.includes('先に'),'内容変更が拒否されない')});
+ out.textContent+='\n模擬通信＋実IndexedDB：5件完了。実LINE/GASでの期限切れ再登録を証明するものではありません。';
+ }catch(e){out.textContent+='\nFAIL '+e.message}finally{all.push(uid);for(const u of all)for(const r of await journal.list(u))await journal.remove(r.key);active=false;}
+ };
+ document.getElementById('runRegisteredReplay').onclick=async()=>{if(active)return;active=true;out.textContent='登録済み状態を確認中…';const uid='isolated-live-replay-'+Date.now();
+ try{
+ check(token,'LINE認証が必要です');const before=await rpc('readTestRegistration',{idToken:token});check(before.registered&&before.name==='テスト太郎'&&!before.needsNameRegistration,'既登録のテスト太郎のみ検証可能です。新規登録はしません。');
+ let sent=0;const send=async(m,p)=>{sent++;const r=await rpc(m,p);check(r.registered&&!r.needsNameRegistration,'登録結果不正');if(sent===1)throw Error('試験：実GASの成功応答を受信後、模擬で破棄');return r};
+ try{await journal.execute(uid,'registerStaffName',{...payload,idToken:token},send)}catch(e){check(e.message.startsWith('試験：'),'実GAS確認失敗。再試行停止：'+e.message)}
+ check((await journal.list(uid))[0]?.state==='pending','pendingなし');
+ await journal.execute(uid,'registerStaffName',{...payload,idToken:token},send);
+ const after=await rpc('readTestRegistration',{idToken:token});check(after.registered&&after.name==='テスト太郎'&&!after.needsNameRegistration,'保存状態不一致');check((await journal.list(uid))[0].state==='received','復旧未完了');
+ out.textContent='PASS 実LINE認証 → 別アカウントのテストGAS\nPASS 既登録応答を受信後に模擬で破棄 → pending\nPASS 同内容再送 → received\nPASS 再照会：テスト太郎・保存済み true・初回登録未完了 false\n本番への通信なし。未登録者の期限切れ試験ではありません。';
+ }catch(e){out.textContent='停止：'+e.message}finally{for(const r of await journal.list(uid))await journal.remove(r.key);active=false;}
+ };
+})();
+
 </script></body></html>
+
