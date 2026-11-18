@@ -1,0 +1,45 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>申請登録テスト</title><style>body{font:18px/1.6 sans-serif;max-width:620px;margin:20px auto;padding:16px;color:#18372d;background:#f7faf8}button,input{box-sizing:border-box;font:inherit;padding:14px;margin:12px 0;display:block;width:100%}button{background:#176b46;color:white;border:0;border-radius:8px}button:disabled{opacity:.45}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#e7f0ea;padding:16px;border-radius:8px}small{display:block}</style></head><body><h1>申請登録テスト</h1><p>本番とは別の検証専用です。社員名・実際の申請内容は入力しないでください。</p><p id="state" role="status">画面を読み込みました。LINE認証を準備しています。</p><button id="login" hidden>LINEにログイン</button><label>検証用PIN<input id="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off"></label><button id="check" disabled>1. PINを確認</button><button id="before" disabled>2. 修正前を確認（保存されない想定）</button><button id="after" disabled>3. 修正後を確認（テスト太郎を登録）</button><button id="read" disabled>4. 保存結果を確認</button><pre id="out" aria-live="polite">認証情報は画面・ログに表示しません。</pre><small>業務用の暗証番号は入力しないでください。テスト氏名は固定です。</small><script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script><script>
+'use strict';
+const LIFF_ID='2012669211-AM8lOc9u';
+const API='https://script.google.com/macros/s/AKfycbwCCr9E0YAtm5CT7A9Tf8IqQ2ta8DBzTu2rS04ynNOvRUSfscn2O44kPkfsBgbKtO8/exec';
+let token='',grant='',busy=false;
+const q=id=>document.getElementById(id), log=t=>q('out').textContent=t;
+async function rpc(method,data){
+ const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),45000);
+ try{
+  const response=await fetch(API,{method:'POST',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify({method,data}),credentials:'omit',redirect:'follow',signal:controller.signal});
+  if(!response.ok)throw Error('通信エラー。時間をおいて保存結果を確認してください。');
+  const result=await response.json();
+  if(!result.ok)throw Error(result.error||'処理を確認できませんでした');
+  return result.result;
+ }catch(e){if(e.name==='AbortError')throw Error('通信が時間切れです。再登録の前に保存結果を確認してください。');throw e;}finally{clearTimeout(timer);}
+}
+async function action(fn){if(busy)return;busy=true;try{await fn();}catch(e){log('結果: '+(e.message||'処理を確認できませんでした'));}finally{busy=false;}}
+q('check').onclick=()=>action(async()=>{
+ const pin=q('pin').value;q('pin').value='';
+ if(!/^\d{4}$/.test(pin))throw Error('検証用の4桁PINを入力してください');
+ const r=await rpc('verifyRegistrationPin',{idToken:token,pin});
+ if(r.registered){log('このLINE利用者はテスト登録済みです。保存結果を確認できます。');return;}
+ grant=r.grant;if(!grant)throw Error('確認用情報を受け取れませんでした');
+ q('before').disabled=false;q('after').disabled=false;log('PIN確認成功。先に「修正前」を実行してください。');
+});
+async function register(includeGrant){
+ const payload={idToken:token,realName:'テスト太郎',guardRole:'一般警備員',page:'transport'};
+ if(includeGrant)payload.registrationGrant=grant;
+ const r=await rpc('registerStaffName',payload);
+ if(!r.registered||r.needsNameRegistration)throw Error('登録結果が不完全です');
+ log((includeGrant?'修正後':'修正前')+'：登録結果を受信。氏名 '+r.name+'。保存結果を確認してください。');
+}
+q('before').onclick=()=>action(()=>register(false));
+q('after').onclick=()=>action(()=>register(true));
+q('read').onclick=()=>action(async()=>{const r=await rpc('readTestRegistration',{idToken:token});log('保存済み: '+r.registered+'\n氏名: '+(r.name||'未登録')+'\n初回登録未完了: '+r.needsNameRegistration);});
+q('login').onclick=()=>liff.login({redirectUri:location.origin+location.pathname});
+(async()=>{try{
+ if(typeof liff==='undefined')throw Error('LINE SDKを読み込めませんでした。通信状態を確認してください。');
+ await liff.init({liffId:LIFF_ID});
+ if(!liff.isLoggedIn()){q('state').textContent='LINEへのログインが必要です。下のボタンを押してください。';q('login').hidden=false;return;}
+ token=liff.getIDToken();if(!token)throw Error('LINE認証情報を取得できませんでした');
+ q('state').textContent='テスト用LINE認証が完了しました。';
+ q('check').disabled=false;q('read').disabled=false;
+}catch(e){q('state').textContent='LINE認証を開始できませんでした。'+(e.code?' コード: '+e.code:'');log('画面を閉じて、案内されたテスト用LINEリンクから開き直してください。');}})();
+</script></body></html>
